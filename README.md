@@ -89,6 +89,8 @@ Sau đó mở trình duyệt:
 http://localhost:2013
 ```
 
+Trang mặc định là Giới thiệu. Mở `http://localhost:2013/practice` để vào khu vực nhận diện và thực hành.
+
 Nếu máy bạn dùng lệnh `python` thay cho `py`, hãy thay `python -m venv ...` phù hợp.
 
 ### 6) Chạy app mà không cần Gemini
@@ -111,7 +113,7 @@ Nếu chưa có `GEMINI_API_KEY`, hệ thống vẫn chạy bình thường:
 uvicorn app:app --host 0.0.0.0 --port 2013
 ```
 
-- Mở trình duyệt và truy cập `http://localhost:2013`.
+- Mở trình duyệt và truy cập `http://localhost:2013` để xem Giới thiệu hoặc `http://localhost:2013/practice` để nhận diện dụng cụ.
 - Nếu đang dùng camera trong trình duyệt, hãy đảm bảo truy cập qua `localhost` hoặc HTTPS; nếu không, hãy tải ảnh lên để thử nghiệm.
 
 ### 2) Chọn chế độ nhận diện
@@ -159,9 +161,24 @@ Nếu ứng dụng không nhận diện đúng, hãy thử:
 ## API
 
 - `GET /api/health`: trạng thái cấu hình cơ bản.
-- `POST /api/analyze`: form-data `file` (JPG, PNG, WebP, mặc định tối đa 10 MB). Trả `width`, `height`, `detections` với `box` là `[x1,y1,x2,y2]` theo pixel ảnh gốc, `labels`, `suggestion` và cảnh báo dữ liệu.
+- `POST /api/analyze`: form-data `file` (JPG, PNG, WebP, mặc định tối đa 10 MB). Trả `request_id`, `width`, `height`, `detections` với `box` là `[x1,y1,x2,y2]` theo pixel ảnh gốc, `labels`, `supported_classes`, `suggestion` và cảnh báo dữ liệu. Confidence trả về ở dạng thập phân từ `0` đến `1`.
+- `POST /api/suggestion`: JSON `{ "labels": ["tên dụng cụ đã xác nhận"] }`; chỉ chấp nhận lớp có trong model đang cấu hình.
+- `POST /api/feedback`: multipart gồm `file` (ảnh đã phân tích) và `metadata` (JSON có `report_id`, `request_id`, `detection_id`, `predicted_label`, `confidence`, tùy chọn `student_selected_label`). Trả `status: saved` sau khi lưu thành công.
 
-Ảnh chỉ được đọc trong bộ nhớ lúc xử lý. Camera tự quét tối đa một yêu cầu mỗi 3 giây; có thể tắt tự quét và chụp thủ công. Camera trong trình duyệt cần `localhost` hoặc HTTPS.
+Ảnh nhận diện chỉ được đọc trong bộ nhớ. Khi học sinh báo nhận diện sai, đúng ảnh đã phân tích được gửi vào `data/review_queue/` cùng JSON ghi nhãn dự đoán, mã yêu cầu, mã detection và tọa độ khung để phân biệt nhiều dụng cụ trong cùng ảnh. Đây là khu vực chờ kiểm tra, không được phục vụ công khai và đã được thêm vào `.gitignore`. Bản ghi có `review_status: pending` và `training_status: not_eligible_unverified`; việc chọn tên trong giao diện chỉ được lưu như thông tin tham khảo, không được coi là nhãn đã xác minh.
+
+Giáo viên/người quản trị cần kiểm tra ảnh và đối chiếu `detection_id`, xác nhận nhãn chính xác bằng quy trình riêng, rồi mới chuyển ảnh đã xác minh sang tập dữ liệu huấn luyện có kiểm soát. Không có chức năng duyệt nhãn hoặc huấn luyện lại tự động trong ứng dụng này; cần sao lưu, rà soát chất lượng và chạy quy trình huấn luyện riêng trước khi cập nhật `MODEL_PATH`. Camera tự quét tối đa một yêu cầu mỗi 3 giây; có thể tắt tự quét và chụp thủ công. Camera trong trình duyệt cần `localhost` hoặc HTTPS.
+
+### Kho cảnh báo an toàn và duyệt nội dung
+
+`data/safety_content.json` là kho nội dung tĩnh có cấu trúc, được đọc lại theo từng yêu cầu nên cập nhật không cần sửa mã nguồn hoặc khởi động lại server. Các nội dung người dùng xác nhận đã được giáo viên KHTN duyệt được đánh dấu **Đã duyệt** và có thể hiển thị cho học sinh. Hồ sơ ghi rõ tên người duyệt chưa được cung cấp; trường reviewer hiện ghi “Giáo viên KHTN (theo xác nhận của người dùng)” và ngày ghi nhận 2026-10-15. Các mục ngoài nội dung đã xác nhận vẫn là **Chờ duyệt**, không được trình bày như hướng dẫn đã xác nhận. Giáo viên/người quản trị có thể cập nhật kho theo các bước:
+
+1. Mở JSON trong trình soạn thảo văn bản và chọn đúng bản ghi theo `id`/`name`.
+2. Kiểm tra, chỉnh `hazards`, `avoid`, `student_action` và `hazard_level` theo thiết bị thực tế, quy định phòng thực hành và hướng dẫn của nhà trường.
+3. Chỉ sau khi phê duyệt chính thức, đặt `status` thành `Đã duyệt`, điền `reviewer` (tên người có thẩm quyền), `approved_at` theo ISO 8601 (ví dụ `2026-10-15T09:00:00+07:00`) và cập nhật `version`.
+4. Lưu JSON hợp lệ. Server sẽ chỉ trả nội dung chi tiết khi trạng thái, người duyệt, thời gian và phiên bản đều hợp lệ. Để rút nội dung khỏi học sinh, đổi trạng thái thành `Ngừng sử dụng`.
+
+Ứng dụng chưa có đăng nhập/phân quyền hay giao diện quản trị; quyền sửa tệp phải được giới hạn ở giáo viên/người quản trị trên máy chủ. Bản ghi chỉ được duyệt nếu thực sự đã được người có thẩm quyền kiểm tra; không sao chép trạng thái phê duyệt sang nội dung chưa được xác nhận.
 
 ## Giới hạn
 
