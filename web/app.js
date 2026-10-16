@@ -38,6 +38,7 @@ function updateAutoScan() {
   if (state.stream && $('autoScan').checked) state.timer = setInterval(() => { if (!state.busy) capture(); }, 3000);
 }
 function confidenceRatio(value) { const confidence = Number(value); return confidence > 1 ? confidence / 100 : confidence; }
+function confidenceLabel(value) { return `${(confidenceRatio(value) * 100).toFixed(1)}%`; }
 function confidenceTone(value) {
   const confidence = confidenceRatio(value);
   return confidence < .6 ? 'red' : confidence < .8 ? 'yellow' : 'green';
@@ -48,7 +49,7 @@ function draw(canvas, media, result) {
   // The media uses object-fit: contain; canvas has the same intrinsic aspect ratio.
   ctx.lineWidth = Math.max(3, canvas.width / 250); ctx.font = `bold ${Math.max(15, canvas.width / 45)}px Segoe UI, sans-serif`;
   result.detections.forEach(item => {
-    const [x1, y1, x2, y2] = item.box, label = `${item.label} ${Math.round(confidenceRatio(item.confidence) * 100)}%`;
+    const [x1, y1, x2, y2] = item.box, label = `${item.label} ${confidenceLabel(item.confidence)}`;
     const tone = confidenceTone(item.confidence);
     ctx.strokeStyle = { red: '#d94141', yellow: '#c78a08', green: '#23864b' }[tone]; ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
     const width = ctx.measureText(label).width + 16, height = Math.max(25, canvas.width / 32);
@@ -64,29 +65,90 @@ function list(parent, heading, values, ordered = false) {
 }
 function renderSuggestion(root, suggestion) {
   root.replaceChildren();
-  if (!suggestion.title) { root.append(el('p', suggestion.message || 'Chưa có gợi ý.', 'source')); return; }
+  if (!suggestion.title) {
+    root.append(el('p', suggestion.message || 'Chưa có gợi ý.', 'source'));
+    return;
+  }
   const article = el('article', '', 'lesson'); article.append(el('h3', suggestion.title));
-  article.append(el('p', suggestion.reason)); article.append(el('h4', 'Mục tiêu'));
-  article.append(el('p', suggestion.objective)); list(article, 'Các bước tham khảo', suggestion.steps, true);
+  if (suggestion.ai_provider === 'DeepSeek') {
+    article.append(el('p', 'Phần giải thích được tạo bởi DeepSeek dự phòng.', 'source'));
+  }
+  if (suggestion.purpose || suggestion.use) {
+    article.append(el('h4', 'Công dụng'));
+    article.append(el('p', suggestion.purpose || suggestion.use));
+  }
+  if (suggestion.characteristics) {
+    article.append(el('h4', 'Đặc điểm'));
+    article.append(el('p', suggestion.characteristics));
+  }
+  if (suggestion.basic_knowledge) {
+    article.append(el('h4', 'Kiến thức cơ bản'));
+    article.append(el('p', suggestion.basic_knowledge));
+  }
+  if (suggestion.objective) {
+    article.append(el('h4', suggestion.status === 'draft_saved_pending_review' ? 'Mục tiêu đề xuất' : 'Mục tiêu bài học'));
+    article.append(el('p', suggestion.objective));
+  }
+  if (suggestion.steps?.length) list(article, 'Các bước tham khảo', suggestion.steps, true);
+  if (suggestion.explanation) {
+    const explanation = el('section', '', 'ai-explanation');
+    explanation.append(el('h4', 'Giải thích thêm từ AI'));
+    explanation.append(el('p', suggestion.explanation));
+    article.append(explanation);
+  }
+  if (suggestion.message && suggestion.status !== 'draft_saved_pending_review') {
+    article.append(el('p', suggestion.message, 'source'));
+  }
+  if (suggestion.status === 'draft_saved_pending_review') {
+    article.append(el('p', suggestion.message || 'Gợi ý đang chờ giáo viên KHTN duyệt; chưa dùng làm hướng dẫn thực hành.', 'source'));
+  }
   root.append(article);
+}
+async function loadPracticeSuggestion(labels, analysis, root, detectionRoot) {
+  const requestId = (analysis.suggestionRequest || 0) + 1;
+  analysis.suggestionRequest = requestId;
+  try {
+    const response = await fetch('/api/suggestion', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ labels }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'AI chưa thể tìm gợi ý.');
+    if (state.lastAnalysis !== analysis || analysis.suggestionRequest !== requestId || !root.isConnected) return;
+    if (detectionRoot) {
+      analysis.result.detections.forEach(item => {
+        const label = analysis.confirmedLabels?.get(item.detection_id) || item.label;
+        const safety = (data.safety || []).find(entry => entry.label === label);
+        const slot = detectionRoot.querySelector(`[data-detection-id="${item.detection_id}"] .safety-guidance`);
+        if (safety && slot) renderSafety(slot, safety);
+      });
+    }
+    renderSuggestion(root, data.suggestion);
+  } catch (error) {
+    if (state.lastAnalysis !== analysis || analysis.suggestionRequest !== requestId || !root.isConnected) return;
+    renderSuggestion(root, {
+      status: 'unavailable',
+      message: `${error.message || 'AI chưa thể tìm gợi ý.'} Thông tin nhận diện vẫn được giữ nguyên.`,
+    });
+  }
 }
 function renderSafety(parent, safety) {
   parent.replaceChildren();
   const approved = safety?.status === 'approved';
   parent.className = `safety-guidance ${approved ? 'safety-approved' : 'safety-unapproved'}`;
-  parent.append(el('h4', `An toàn: ${safety?.name || 'Dụng cụ'}`));
+  parent.append(el('h4', safety?.heading || `An toàn: ${safety?.name || 'Dụng cụ'}`));
   if (!approved) {
-    const stateLabel = safety?.status === 'uncertain' ? 'AI CHƯA CHẮC CHẮN' : safety?.status === 'pending' ? 'CHỜ GIÁO VIÊN KHTN DUYỆT' : 'CHƯA CÓ NỘI DUNG ĐƯỢC DUYỆT';
-    parent.append(el('strong', stateLabel, 'safety-state'));
-    parent.append(el('p', safety?.message || 'Chưa có nội dung an toàn đã được giáo viên KHTN duyệt. Em hãy hỏi thầy cô.'));
+    parent.append(el('strong', 'CHƯA CÓ THÔNG TIN AN TOÀN ĐƯỢC DUYỆT', 'safety-state'));
+    parent.append(el('p', 'Hãy hỏi giáo viên.'));
     return;
   }
   parent.append(el('strong', `ĐÃ ĐƯỢC GIÁO VIÊN DUYỆT · Mức độ: ${safety.hazard_level}`, 'safety-state'));
-  parent.append(el('p', `Nguy cơ: ${safety.hazards.join(' ')}`));
+  if (safety.hazards?.length) list(parent, 'Nguy cơ', safety.hazards);
   list(parent, 'Cần tránh', safety.avoid);
   list(parent, 'Để an toàn', safety.student_action);
 }
-function show(result, source) {
+function show(result, source, analysis) {
   $('resultEmpty').hidden = true; $('resultContent').hidden = false;
   const detectionRoot = $('detections'); detectionRoot.replaceChildren();
   if (!result.detections.length) detectionRoot.append(el('p', 'Chưa nhận diện được dụng cụ.'));
@@ -94,18 +156,36 @@ function show(result, source) {
     const uncertain = confidenceRatio(item.confidence) < .6;
     const card = el('article', '', `detection-item ${uncertain ? 'confidence-red' : `confidence-${confidenceTone(item.confidence)}`}`);
     card.dataset.detectionId = String(item.detection_id);
-    card.append(el('span', `${item.label} · ${Math.round(confidenceRatio(item.confidence) * 100)}%`, 'chip'));
+    card.append(el('span', `${item.label} · ${confidenceLabel(item.confidence)}`, 'chip'));
     if (uncertain) {
-      card.append(el('p', 'AI chưa chắc chắn về dụng cụ này. Em hãy hỏi thầy cô trước khi tiếp tục.', 'low-confidence-warning'));
+      card.append(el('p', 'AI chưa chắc chắn, em hãy hỏi thầy cô.', 'low-confidence-warning'));
       const correctionLabel = el('label', 'Chọn lại tên dụng cụ trước khi xem gợi ý', 'correction-label');
       const select = document.createElement('select'); select.setAttribute('aria-label', `Chọn tên đúng cho ${item.label}`);
       select.append(new Option('Chọn tên dụng cụ chính xác', ''));
       (result.supported_classes || []).forEach(label => select.append(new Option(label, label)));
       correctionLabel.append(select); card.append(correctionLabel);
-      const reportButton = el('button', 'AI nhận nhầm rồi', 'report-button'); reportButton.type = 'button';
+      const confirmButton = el('button', 'Xác nhận', 'primary confirm-button'); confirmButton.type = 'button';
+      const confirmStatus = el('p', '', 'feedback-status');
+      confirmButton.disabled = true;
+      confirmButton.onclick = () => {
+        if (!select.value) {
+          status('Hãy chọn tên dụng cụ chính xác trước khi xác nhận.');
+          return;
+        }
+        analysis.confirmedLabels.set(item.detection_id, select.value);
+        confirmButton.textContent = 'Đã xác nhận';
+        confirmStatus.textContent = `Đã xác nhận tên dụng cụ: ${select.value}.`;
+      };
+      select.onchange = () => {
+        analysis.confirmedLabels.delete(item.detection_id);
+        confirmButton.disabled = !select.value;
+        confirmButton.textContent = 'Xác nhận';
+        confirmStatus.textContent = '';
+      };
+      const reportButton = el('button', 'Báo nhận diện sai', 'report-button'); reportButton.type = 'button';
       const reportStatus = el('p', '', 'feedback-status');
       reportButton.onclick = () => sendFeedback(item, select.value, reportButton, reportStatus);
-      card.append(reportButton, reportStatus);
+      card.append(confirmButton, confirmStatus, reportButton, reportStatus);
     }
     const safetySlot = el('section', '', 'safety-guidance');
     renderSafety(safetySlot, item.safety);
@@ -113,32 +193,40 @@ function show(result, source) {
     detectionRoot.append(card);
   });
   const lowConfidence = result.detections.filter(item => confidenceRatio(item.confidence) < .6);
+  const eligibleLabels = [...new Set(result.detections
+    .filter(item => confidenceRatio(item.confidence) >= .6)
+    .map(item => item.label))];
   const root = $('suggestion');
+  const actions = $('suggestionActions');
+  analysis.confirmedLabels = new Map();
+  actions.replaceChildren();
+  renderSuggestion(root, result.suggestion);
   if (lowConfidence.length) {
-    root.replaceChildren();
-    root.append(el('p', 'Chọn lại tên cho từng dụng cụ chưa chắc chắn để tiếp tục xem bài học và hướng dẫn.', 'source'));
-    const continueButton = el('button', 'Xem gợi ý sau khi xác nhận', 'primary confirm-button'); continueButton.type = 'button';
+    if (eligibleLabels.length) loadPracticeSuggestion(eligibleLabels, analysis, root, detectionRoot);
+    else renderSuggestion(root, {
+      status: 'needs_confirmation',
+      message: 'Hãy chọn lại tên dụng cụ chưa chắc chắn trước khi AI tìm gợi ý bài thực hành.',
+    });
+    const continueButton = el('button', 'Tìm gợi ý sau khi xác nhận', 'primary confirm-button'); continueButton.type = 'button';
     continueButton.onclick = async () => {
-      const selections = [...detectionRoot.querySelectorAll('.confidence-red select')];
-      if (selections.some(select => !select.value)) { status('Hãy chọn tên chính xác cho tất cả dụng cụ màu đỏ trước.'); return; }
-      const selected = new Map(lowConfidence.map((item, index) => [item.detection_id, selections[index].value]));
+      if (lowConfidence.some(item => !analysis.confirmedLabels.has(item.detection_id))) {
+        status('Hãy chọn tên chính xác và bấm “Xác nhận” cho từng dụng cụ màu đỏ trước.');
+        return;
+      }
+      const selected = analysis.confirmedLabels;
       const labels = [...new Set(result.detections.map(item => selected.get(item.detection_id) || item.label))];
-      continueButton.disabled = true; continueButton.textContent = 'Đang tìm bài phù hợp…';
-      try {
-        const response = await fetch('/api/suggestion', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ labels }) });
-        const data = await response.json(); if (!response.ok) throw new Error(data.detail || 'Máy chủ chưa thể tìm gợi ý.');
-        result.detections.forEach(item => {
-          const confirmedLabel = selected.get(item.detection_id) || item.label;
-          const safety = (data.safety || []).find(entry => entry.label === confirmedLabel);
-          const card = detectionRoot.querySelector(`[data-detection-id="${item.detection_id}"] .safety-guidance`);
-          if (safety && card) renderSafety(card, safety);
-        });
-        renderSuggestion(root, data.suggestion);
-      } catch (error) { status(`Chưa tải được gợi ý: ${error.message}`); continueButton.disabled = false; continueButton.textContent = 'Thử xem gợi ý lại'; }
+      analysis.confirmedLabels = selected;
+      continueButton.disabled = true; continueButton.textContent = 'AI đang tìm gợi ý…';
+      renderSuggestion(root, { status: 'awaiting_ai', message: 'AI đang tìm gợi ý bài thực hành...' });
+      await loadPracticeSuggestion(labels, analysis, root, detectionRoot);
+      if (state.lastAnalysis === analysis) {
+        continueButton.disabled = false;
+        continueButton.textContent = 'Tìm gợi ý lại';
+      }
     };
-    root.append(continueButton);
-  } else {
-    renderSuggestion(root, result.suggestion);
+    actions.append(continueButton);
+  } else if (result.labels.length) {
+    loadPracticeSuggestion(result.labels, analysis, root, detectionRoot);
   }
   draw(source === 'camera' ? $('cameraOverlay') : $('imageOverlay'), source === 'camera' ? video : preview, result);
   status(result.detections.length ? `Đã nhận diện ${result.detections.length} vùng dụng cụ.` : 'Chưa thấy dụng cụ. Hãy thử ảnh rõ và đủ sáng hơn.');
@@ -154,7 +242,7 @@ async function analyze(blob, filename, source) {
     if (!response.ok) throw new Error(result.detail || 'Máy chủ chưa thể xử lý ảnh.');
     state.lastAnalysis = { blob, filename, source, result };
     state.reports = new Map();
-    show(result, source);
+    show(result, source, state.lastAnalysis);
   } catch (error) { status(error.name === 'AbortError' ? 'Quá thời gian xử lý. Hãy thử lại.' : `Có lỗi: ${error.message}`); }
   finally { clearTimeout(timer); state.busy = false; $('cameraState').textContent = state.stream ? 'Camera đang bật' : 'Sẵn sàng'; }
 }

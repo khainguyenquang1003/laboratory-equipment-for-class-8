@@ -6,15 +6,22 @@
     {
       "id": "alcohol-lamp",
       "name": "Đèn cồn",
+      "heading": "Nguy hiểm: đèn cồn",
       "aliases": ["alcohol lamp", "đèn cồn", "den con"],
       "hazard_level": "Cao",
-      "hazards": ["Có ngọn lửa, có thể gây bỏng hoặc làm cháy các vật xung quanh."],
+      "hazards": [
+        "Nguy cơ cháy, bỏng: Ngọn lửa có thể gây bỏng da, cháy tóc hoặc quần áo.",
+        "Nguy cơ cháy nổ: Cồn dễ bay hơi và bắt lửa; cồn tràn hoặc rò rỉ có thể khiến lửa lan nhanh.",
+        "Nguy cơ vỡ dụng cụ: Đèn cồn bị nứt, đổ hoặc sử dụng sai cách có thể gây tràn cồn đang cháy.",
+        "Nguy cơ hít phải khói: Đốt cồn trong không gian kín, thông gió kém có thể gây khó chịu.",
+        "Nguy cơ tai nạn: Di chuyển đèn khi đang cháy hoặc tự ý châm thêm cồn có thể gây cháy, bỏng nghiêm trọng."
+      ],
       "avoid": ["Không tự ý châm lửa, di chuyển hoặc sử dụng đèn cồn.", "Không đùa nghịch gần ngọn lửa và các vật dễ cháy.", "Không tự ý thêm cồn hoặc xử lý đèn khi đèn đang cháy."],
       "student_action": ["Chỉ quan sát và thực hiện thí nghiệm khi có giáo viên trực tiếp hướng dẫn.", "Nếu xảy ra sự cố, hãy tránh xa khu vực nguy hiểm và báo ngay cho giáo viên."],
       "status": "Đã duyệt",
       "reviewer": "Giáo viên KHTN (theo xác nhận của người dùng)",
-      "approved_at": "2026-10-15",
-      "version": "1.0"
+      "approved_at": "2026-10-16",
+      "version": "1.1"
     },
     {
       "id": "laboratory-chemicals",

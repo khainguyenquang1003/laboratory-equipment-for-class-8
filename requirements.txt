@@ -6,3 +6,4 @@ ultralytics
 pillow
 google-genai
 python-dotenv
+# DeepSeek uses Python's standard-library urllib; no extra package is required.

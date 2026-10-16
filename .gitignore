@@ -1,7 +1,9 @@
 .env
+%SystemDrive%/
 __pycache__/
 *.pyc
 .venv/
 *.log
 certs/*.key
 data/review_queue/
+data/ai_lesson_drafts.json
