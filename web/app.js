@@ -49,12 +49,13 @@ function draw(canvas, media, result) {
   // The media uses object-fit: contain; canvas has the same intrinsic aspect ratio.
   ctx.lineWidth = Math.max(3, canvas.width / 250); ctx.font = `bold ${Math.max(15, canvas.width / 45)}px Segoe UI, sans-serif`;
   result.detections.forEach(item => {
-    const [x1, y1, x2, y2] = item.box, label = `${item.label} ${confidenceLabel(item.confidence)}`;
-    const tone = confidenceTone(item.confidence);
-    ctx.strokeStyle = { red: '#d94141', yellow: '#c78a08', green: '#23864b' }[tone]; ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+    const [x1, y1, x2, y2] = item.box;
+    const label = item.corrected ? `${item.label} · đã nhớ` : `${item.label} ${confidenceLabel(item.confidence)}`;
+    const tone = item.corrected ? 'corrected' : confidenceTone(item.confidence);
+    ctx.strokeStyle = { red: '#d94141', yellow: '#c78a08', green: '#23864b', corrected: '#167a67' }[tone]; ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
     const width = ctx.measureText(label).width + 16, height = Math.max(25, canvas.width / 32);
     const top = y1 > height ? y1 - height : y1;
-    ctx.fillStyle = { red: '#b52d35', yellow: '#9b6800', green: '#176c3a' }[tone]; ctx.fillRect(x1, top, width, height);
+    ctx.fillStyle = { red: '#b52d35', yellow: '#9b6800', green: '#176c3a', corrected: '#126858' }[tone]; ctx.fillRect(x1, top, width, height);
     ctx.fillStyle = '#fff'; ctx.fillText(label, x1 + 8, top + height * .72);
   });
 }
@@ -153,20 +154,29 @@ function show(result, source, analysis) {
   const detectionRoot = $('detections'); detectionRoot.replaceChildren();
   if (!result.detections.length) detectionRoot.append(el('p', 'Chưa nhận diện được dụng cụ.'));
   result.detections.forEach(item => {
-    const uncertain = confidenceRatio(item.confidence) < .6;
-    const card = el('article', '', `detection-item ${uncertain ? 'confidence-red' : `confidence-${confidenceTone(item.confidence)}`}`);
+    const uncertain = item.corrected || confidenceRatio(item.confidence) < .6;
+    const cardTone = item.corrected ? 'corrected-label' : uncertain ? 'confidence-red' : `confidence-${confidenceTone(item.confidence)}`;
+    const card = el('article', '', `detection-item ${cardTone}`);
     card.dataset.detectionId = String(item.detection_id);
-    card.append(el('span', `${item.label} · ${confidenceLabel(item.confidence)}`, 'chip'));
+    card.append(el('span', item.corrected ? `${item.label} · đã nhớ nhãn sửa` : `${item.label} · ${confidenceLabel(item.confidence)}`, 'chip'));
     if (uncertain) {
-      card.append(el('p', 'AI chưa chắc chắn, em hãy hỏi thầy cô.', 'low-confidence-warning'));
-      const correctionLabel = el('label', 'Chọn lại tên dụng cụ trước khi xem gợi ý', 'correction-label');
-      const select = document.createElement('select'); select.setAttribute('aria-label', `Chọn tên đúng cho ${item.label}`);
-      select.append(new Option('Chọn tên dụng cụ chính xác', ''));
-      (result.supported_classes || []).forEach(label => select.append(new Option(label, label)));
-      correctionLabel.append(select); card.append(correctionLabel);
-      const confirmButton = el('button', 'Xác nhận', 'primary confirm-button'); confirmButton.type = 'button';
+      card.append(el('p', item.corrected
+        ? 'Đây là nhãn đã nhớ từ lần sửa trước. Hãy xác nhận trước khi dùng gợi ý; độ tin cậy bên dưới không áp dụng cho nhãn sửa.'
+        : 'AI chưa chắc chắn, em hãy hỏi thầy cô.', 'low-confidence-warning'));
+    }
+    const correctionLabel = el('label',
+      uncertain ? 'Chọn hoặc xác nhận tên dụng cụ trước khi xem gợi ý' : 'Nếu nhận diện sai, chọn tên đúng trước khi báo',
+      'correction-label');
+    const select = document.createElement('select'); select.setAttribute('aria-label', `Chọn tên đúng cho ${item.label}`);
+    select.append(new Option(item.corrected ? 'Xác nhận nhãn đã nhớ hoặc chọn nhãn khác' : 'Chọn tên dụng cụ chính xác', ''));
+    (result.supported_classes || []).forEach(label => select.append(new Option(label, label)));
+    if (item.corrected) select.value = item.label;
+    correctionLabel.append(select); card.append(correctionLabel);
+
+    if (uncertain) {
+      const confirmButton = el('button', item.corrected ? 'Xác nhận nhãn đã nhớ' : 'Xác nhận', 'primary confirm-button'); confirmButton.type = 'button';
       const confirmStatus = el('p', '', 'feedback-status');
-      confirmButton.disabled = true;
+      confirmButton.disabled = !select.value;
       confirmButton.onclick = () => {
         if (!select.value) {
           status('Hãy chọn tên dụng cụ chính xác trước khi xác nhận.');
@@ -182,19 +192,20 @@ function show(result, source, analysis) {
         confirmButton.textContent = 'Xác nhận';
         confirmStatus.textContent = '';
       };
-      const reportButton = el('button', 'Báo nhận diện sai', 'report-button'); reportButton.type = 'button';
-      const reportStatus = el('p', '', 'feedback-status');
-      reportButton.onclick = () => sendFeedback(item, select.value, reportButton, reportStatus);
-      card.append(confirmButton, confirmStatus, reportButton, reportStatus);
+      card.append(confirmButton, confirmStatus);
     }
+    const reportButton = el('button', 'Báo nhận diện sai', 'report-button'); reportButton.type = 'button';
+    const reportStatus = el('p', '', 'feedback-status');
+    reportButton.onclick = () => sendFeedback(item, select.value, reportButton, reportStatus);
+    card.append(reportButton, reportStatus);
     const safetySlot = el('section', '', 'safety-guidance');
     renderSafety(safetySlot, item.safety);
     card.append(safetySlot);
     detectionRoot.append(card);
   });
-  const lowConfidence = result.detections.filter(item => confidenceRatio(item.confidence) < .6);
+  const lowConfidence = result.detections.filter(item => item.corrected || confidenceRatio(item.confidence) < .6);
   const eligibleLabels = [...new Set(result.detections
-    .filter(item => confidenceRatio(item.confidence) >= .6)
+    .filter(item => !item.corrected && confidenceRatio(item.confidence) >= .6)
     .map(item => item.label))];
   const root = $('suggestion');
   const actions = $('suggestionActions');
@@ -253,19 +264,22 @@ async function sendFeedback(item, selectedLabel, button, output) {
   if (!report) { report = { reportId: crypto.randomUUID(), sending: false, sent: false }; state.reports.set(item.detection_id, report); }
   if (report.sending || report.sent) return;
   report.sending = true; button.disabled = true; button.textContent = 'Đang gửi ảnh…';
-  output.textContent = 'Xin lỗi em! AI có thể đã nhận diện nhầm dụng cụ. Cảm ơn em đã giúp AI cải thiện độ chính xác!';
+  output.textContent = 'Đang gửi ảnh và nhãn em chọn để lưu phản hồi…';
   try {
     const body = new FormData(); body.append('file', analysis.blob, analysis.filename);
     body.append('metadata', JSON.stringify({
       report_id: report.reportId, request_id: analysis.result.request_id,
-      detection_id: item.detection_id, predicted_label: item.label,
+      detection_id: item.detection_id, predicted_label: item.model_label || item.label,
       confidence: confidenceRatio(item.confidence), box: item.box,
       student_selected_label: selectedLabel || null,
+      model_fingerprint: analysis.result.model_fingerprint,
     }));
     const response = await fetch('/api/feedback', { method: 'POST', body });
     const data = await response.json(); if (!response.ok || data.status !== 'saved') throw new Error(data.detail || 'Máy chủ chưa xác nhận đã lưu ảnh.');
     report.sent = true; button.textContent = 'Đã gửi';
-    output.textContent = 'Đã gửi ảnh thành công! Cảm ơn em đã giúp AI học tốt hơn.';
+    output.textContent = data.correction_remembered
+      ? 'Đã lưu phản hồi và ghi nhớ nhãn em chọn cho đúng ảnh này trên máy chủ. Model chưa được huấn luyện lại.'
+      : 'Đã lưu ảnh để giáo viên kiểm tra. Chọn một nhãn khác với kết quả nhận diện để ghi nhớ cho đúng ảnh này.';
   } catch (error) {
     button.disabled = false; button.textContent = 'Thử gửi lại';
     output.textContent = 'Chưa gửi được ảnh. Em hãy thử lại sau nhé.';

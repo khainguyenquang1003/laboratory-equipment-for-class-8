@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import math
 import os
@@ -200,6 +201,66 @@ def get_model():
     except OSError as exc:
         raise FileNotFoundError(f"Không thể truy cập mô hình: {path}") from exc
     return load_model(str(path), metadata.st_mtime_ns, metadata.st_size)
+
+
+def current_model_fingerprint() -> str:
+    path = model_path()
+    metadata = path.stat()
+    model_version = f"{path.resolve()}:{metadata.st_mtime_ns}:{metadata.st_size}"
+    return hashlib.sha256(model_version.encode("utf-8")).hexdigest()
+
+
+def apply_remembered_corrections(
+    image_sha256: str,
+    model_fingerprint: str,
+    detections: list[dict],
+    supported_classes: list[str],
+) -> None:
+    if not REVIEW_QUEUE.exists():
+        return
+
+    allowed_classes = {normalized(label) for label in supported_classes}
+    records = []
+    try:
+        metadata_files = REVIEW_QUEUE.glob("*.json")
+        for metadata_path in metadata_files:
+            try:
+                record = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"Không thể đọc phản hồi nhận diện đã lưu: {metadata_path.name}"
+                ) from exc
+            if not isinstance(record, dict):
+                raise RuntimeError(f"Bản ghi phản hồi không hợp lệ: {metadata_path.name}")
+            selected_label = record.get("student_selected_label")
+            if (
+                record.get("image_sha256") != image_sha256
+                or record.get("model_fingerprint") != model_fingerprint
+                or not isinstance(selected_label, str)
+                or not isinstance(record.get("detection_id"), int)
+                or isinstance(record.get("detection_id"), bool)
+                or not isinstance(record.get("box"), list)
+                or len(record["box"]) != 4
+                or normalized(selected_label) not in allowed_classes
+                or normalized(selected_label) == normalized(str(record.get("predicted_label", "")))
+            ):
+                continue
+            records.append(record)
+    except OSError as exc:
+        raise RuntimeError("Không thể truy cập hàng chờ phản hồi nhận diện.") from exc
+
+    detections_by_id = {item["detection_id"]: item for item in detections}
+    for record in sorted(records, key=lambda item: str(item.get("received_at", ""))):
+        detection = detections_by_id.get(record.get("detection_id"))
+        if (
+            detection is None
+            or normalized(detection["label"]) != normalized(str(record.get("predicted_label", "")))
+            or detection["box"] != record.get("box")
+        ):
+            continue
+        detection["model_label"] = detection["label"]
+        detection["label"] = record["student_selected_label"]
+        detection["corrected"] = True
 
 
 def candidate_lessons(labels: list[str]) -> list[dict]:
@@ -677,6 +738,7 @@ async def analyze(file: UploadFile = File(...)):
     image = valid_image(raw, file.content_type or "", limit)
     try:
         model = get_model()
+        fingerprint = current_model_fingerprint()
         result = model.predict(image, conf=float(os.getenv("CONFIDENCE_THRESHOLD", "0.25")), verbose=False)[0]
         detections = []
         if result.boxes is not None:
@@ -692,14 +754,31 @@ async def analyze(file: UploadFile = File(...)):
                     "confidence": round(confidence, 3),
                     "box": [round(float(x), 1) for x in box.xyxy[0].tolist()],
                 })
+        classes = supported_labels(model)
+        apply_remembered_corrections(
+            hashlib.sha256(raw).hexdigest(),
+            fingerprint,
+            detections,
+            classes,
+        )
         labels = sorted({item["label"] for item in detections})
         confirmed_labels = sorted({
             item["label"] for item in detections
-            if item["confidence"] >= LOW_CONFIDENCE
+            if item["confidence"] >= LOW_CONFIDENCE and not item.get("corrected")
         })
-        uncertain = any(item["confidence"] < LOW_CONFIDENCE for item in detections)
+        uncertain = any(
+            item["confidence"] < LOW_CONFIDENCE or item.get("corrected")
+            for item in detections
+        )
         for item in detections:
-            item["safety"] = safety_content_for(item["label"], item["confidence"])
+            if item.get("corrected"):
+                item["safety"] = {
+                    "status": "uncertain",
+                    "name": item["label"],
+                    "message": "Đây là nhãn đã ghi nhớ từ lần sửa trước, chưa được giáo viên xác nhận. Hãy hỏi thầy cô.",
+                }
+            else:
+                item["safety"] = safety_content_for(item["label"], item["confidence"])
     except Exception as exc:
         raise HTTPException(503, f"Không thể chạy mô hình nhận diện: {exc}") from exc
     safety_items, _ = safety_gate(labels)
@@ -720,13 +799,14 @@ async def analyze(file: UploadFile = File(...)):
         suggestion = {"status": "no_detection", "message": "Chưa thấy dụng cụ. Hãy chụp rõ hơn, đủ sáng và đưa dụng cụ vào giữa ảnh."}
     return {
         "request_id": str(uuid4()),
+        "model_fingerprint": fingerprint,
         "width": image.width,
         "height": image.height,
         "detections": detections,
         "safety": safety_items,
         "labels": labels,
         "suggestion_labels": confirmed_labels if uncertain else labels,
-        "supported_classes": supported_labels(model),
+        "supported_classes": classes,
         "suggestion": suggestion,
         "data_notice": LESSONS["notice"],
     }
@@ -789,16 +869,53 @@ async def feedback(file: UploadFile = File(...), metadata: str = File(...)):
         confidence = float(report["confidence"])
         predicted_label = str(report["predicted_label"])[:120]
         box = [float(value) for value in report["box"]]
+        student_selected_label = report.get("student_selected_label")
+        reported_model_fingerprint = report.get("model_fingerprint")
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(400, "Thông tin nhận diện gửi kèm không hợp lệ.") from exc
     if detection_id < 0 or not 0 <= confidence <= 1 or not predicted_label or len(box) != 4 or not all(math.isfinite(value) for value in box):
         raise HTTPException(400, "Thông tin nhận diện gửi kèm không hợp lệ.")
+    if student_selected_label is not None:
+        if not isinstance(student_selected_label, str) or not student_selected_label.strip():
+            raise HTTPException(400, "Tên dụng cụ được chọn không hợp lệ.")
+        student_selected_label = student_selected_label.strip()[:120]
+        if normalized(student_selected_label) not in {
+            normalized(label) for label in supported_labels(get_model())
+        }:
+            raise HTTPException(400, "Tên dụng cụ được chọn không thuộc lớp mà mô hình hỗ trợ.")
+    if reported_model_fingerprint is not None and (
+        not isinstance(reported_model_fingerprint, str) or len(reported_model_fingerprint) > 500
+    ):
+        raise HTTPException(400, "Phiên bản mô hình gửi kèm không hợp lệ.")
 
     extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}[file.content_type]
     image_path = REVIEW_QUEUE / f"{report_id}{extension}"
     metadata_path = REVIEW_QUEUE / f"{report_id}.json"
+    image_sha256 = hashlib.sha256(raw).hexdigest()
+    current_fingerprint = current_model_fingerprint()
+    correction_remembered = bool(
+        student_selected_label
+        and normalized(student_selected_label) != normalized(predicted_label)
+        and reported_model_fingerprint == current_fingerprint
+    )
     if metadata_path.exists():
-        return {"status": "saved", "report_id": report_id}
+        try:
+            existing_record = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(500, "Không thể đọc báo cáo đã lưu.") from exc
+        if not isinstance(existing_record, dict):
+            raise HTTPException(500, "Bản ghi báo cáo đã lưu không hợp lệ.")
+        return {
+            "status": "saved",
+            "report_id": report_id,
+            "correction_remembered": bool(
+                existing_record.get("image_sha256") == image_sha256
+                and existing_record.get("model_fingerprint") == current_fingerprint
+                and isinstance(existing_record.get("student_selected_label"), str)
+                and normalized(existing_record["student_selected_label"])
+                != normalized(str(existing_record.get("predicted_label", "")))
+            ),
+        }
 
     REVIEW_QUEUE.mkdir(parents=True, exist_ok=True)
     record = {
@@ -808,7 +925,9 @@ async def feedback(file: UploadFile = File(...), metadata: str = File(...)):
         "box": box,
         "predicted_label": predicted_label,
         "confidence": confidence,
-        "student_selected_label": str(report.get("student_selected_label", ""))[:120] or None,
+        "student_selected_label": student_selected_label,
+        "image_sha256": image_sha256,
+        "model_fingerprint": reported_model_fingerprint,
         "received_at": datetime.now(timezone.utc).isoformat(),
         "review_status": "pending",
         "training_status": "not_eligible_unverified",
@@ -826,4 +945,8 @@ async def feedback(file: UploadFile = File(...), metadata: str = File(...)):
         image_path.unlink(missing_ok=True)
         metadata_path.unlink(missing_ok=True)
         raise HTTPException(500, "Không thể lưu ảnh vào hàng chờ kiểm duyệt.") from exc
-    return {"status": "saved", "report_id": report_id}
+    return {
+        "status": "saved",
+        "report_id": report_id,
+        "correction_remembered": correction_remembered,
+    }
